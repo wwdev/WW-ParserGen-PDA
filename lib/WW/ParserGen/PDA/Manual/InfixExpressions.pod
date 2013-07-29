@@ -1,0 +1,341 @@
+=pod
+
+=head1 NAME
+
+WW::ParserGen::PDA::Manual::InfixExpressions - Efficently Parse Infix Expressions
+
+=head1 DESCRIPTION
+
+This document explains how to use the parser's builtin infix expression
+parsing features. The operators can have an arbitrary number of different
+precedences, be left or right associative and each operator can have its
+own own custom op for constructing the operator's node in the expression
+tree.
+
+The parsing is done in a single pass with no backtracking except that done
+by the expression atom rule. Operator matching uses a process similar to
+that used by the &&key_match directive.
+
+=head1 DEFINE THE OPERATORS
+
+The first thing to do is to define the operators in an operator table
+at the beginning of the grammar.
+
+Here is an example:
+
+    @infix_operators expr {
+        "*"     left    100     &math_op
+        "/"     left    100     &math_op
+        "+"     left    90      &math_op
+        "-"     left    90      &math_op
+        "<<<"   left    80      &list_op
+        ">>>"   left    80      &list_op
+        "="     left    70      &cmp_op
+        "!="    left    70      &cmp_op
+        "<"     left    70      &cmp_op
+        "<="    left    70      &cmp_op
+        ">"     left    70      &cmp_op
+        ">="    left    70      &cmp_op
+        "&"     left    40      &and_or_op
+        "&&"    left    40      &and_or_op
+        "|"     left    35      &and_or_op
+        "||"    left    35      &and_or_op
+        "?"     right   30      &cond_op
+        ":"     right   30      &binary_op
+        ":="    right   10      &assign_op
+        "+="    right   10      &assign_op
+        "||="   right   10      &assign_op
+        "<<="   right   10      &assign_op
+    }
+
+The table is named C<< expr >>. The particular name isn't important, it is just used
+to select an operator table since more than one can be defined.
+
+The operator definition lines start with the operator characters. An operator can also 
+be an alpanumeric keyword. Next is the associativty: left or right. Following that is a 
+precedence value. Larger numbers mean higher precedence. The particular values don't matter, 
+just their ordering. The last item specifies that a custom match op should be called 
+to construct the operator's node in the expression tree. It is an optional part of the 
+dfinition. When not specified, a plain hash will be used. The use of the parse ops
+will be discussed later.
+
+=head1 THE EXPRESSION PARSE RULE
+
+To parse an infix expression requires the definition of two rules. One for the expression, and another
+one for the expression atom. An atom is typically a constant, variable reference, unary expression, 
+function call, or parenthesized expression.
+
+This is the standard form the expression rule:
+
+    # &expr_op sets up $$r5 as an array stack that is used by &&expr_tree
+    expression ::=
+        $$r0 = expression_atom (
+            (
+                ws? &&infix_operator[expr]
+                ( ws? $$r1 = expression_atom &&infix_operator_arg
+                    | &&fatal["expected <expr> after operator"] )
+            )+
+            $$r0 = &&infix_expr_tree
+        )? $$ = $$r0.
+
+The C<< &&infix_... >> directives maintain an expression stack in register 5 so that register must
+be not be used elswhere in the rule.
+
+This rule starts by looking for an expression atom and saving it in register 0. Next is a conditional
+loop for processing operators. It starts with a match looking for an operator from the operator table
+defined earlier. The table was named C<< expr >> so that is the table name used here. The 
+C<< &&infix_operator >> directive requires that the first expression atom value be in register 0. The 
+directive adds the atom value and the operator to the expression stack.
+
+After matching the operator, another expression atom is matched as a possible right-argument for the operator.
+Its value must be stored in register 1 as is done here. Then the C<< &&infix_operator_arg >> directive
+adds the match atom to the expression stack. When possible, the high-precedence operators and their arguments
+are converted into expession nodes.
+
+After matching at least one operator, the expression stack is converted to a tree. If an operator does not
+have a constructor op specified, its tree node will be a hash with the keys C<< qw( left_arg operator right_arg ) >>.
+When a constructor op is defined, the op will be called with the registers having these values:
+
+=over 4
+
+=item B<r0>
+
+the left argument
+
+=item B<r1>
+
+the operator text
+
+=item B<r2>
+
+the right argument
+
+=item B<r3>
+
+the precdence value
+
+=item B<r4>
+
+the operator associativity flag: -1 is left, +1 is right
+
+=back
+
+For right associative operators the left/right arguments are swapped. This
+allows a striaghtforward left-to-right bottom-up walk of the expression
+tree to evaluate operators and the their arguments in the correct order.
+
+The C<< infix_expr_tree >> directive returns the constructed tree. It is stored
+in register 0 to replace the initial expression atom. The rule's final
+action is to use register 0 as the match value. This rule handles the case
+where the expression is just a match atom and there are no infix operators.
+
+=head1 THE CONSTRUCTOR OPS
+
+=head2 binary_op
+
+This is a generic op used for the : part of a conditinal ?: expression.
+
+    &binary_op () {
+        $ctx->{last_match} = AST::BinaryOp->new (
+            node_type       => 'binary_op',
+            left            => $ctx->register (0),
+            operator        => $ctx->register (1),
+            right           => $ctx->register (2),
+            precedence      => $ctx->register (3),
+            associativity   => $ctx->register (4),
+        );
+    }
+
+=head2 math_op
+
+This op constructs an arithmetic node which performs
+the operator's calculation.
+
+    &math_op () {
+        $ctx->{last_match} = AST::MathOp->new (
+            node_type       => 'math_op',
+            left            => $ctx->register (0),
+            operator        => $ctx->register (1),
+            right           => $ctx->register (2),
+            precedence      => $ctx->register (3),
+            associativity   => $ctx->register (4),
+        );
+    }
+
+=head2 list_op
+
+This op handles array push/pop operations.
+
+    &list_op () {
+        $ctx->{last_match} = AST::ListOp->new (
+            node_type       => 'math_op',
+            left            => $ctx->register (0),
+            operator        => $ctx->register (1),
+            right           => $ctx->register (2),
+            precedence      => $ctx->register (3),
+            associativity   => $ctx->register (4),
+        );
+    }
+
+=head2 cmp_op
+
+This op combines multiple comparison ops into the
+equivalent && form. The syntax allows:
+
+    a < b <= c
+
+The op builds an expression tree equivalent to:
+
+    a < b && b <= c
+
+This requires marking the operator nodes so that some
+unusual logical expressions aren't confused with a series
+of comparisonn operators.
+
+    &cmp_op ( $$r0 $$r1 $$r2 $$r3 $$r4 ) {
+        # left-assiociative, so left to right construction
+        if (ref ($r0) && ($r0->{node_type} eq 'cmp_op' || $r0->{is_compare_chain})) {
+            # convert a <= b <= c to (a <= b) && (b <= c)
+            # use the is_compare_chain status to handle 3 or more compare ops in a row
+            # (also to be able to distinguish between ($a > 3 && $b < 1) < 2 and a compare chain)
+            $ctx->{last_match} = AST::AndOrOp->new (
+                node_type       => 'and_or_op',
+                left            => $r0,
+                operator        => '&&',
+                right           => AST::CmpOp->new (
+                    node_type       => 'cmp_op',
+                    left            => ($r0->{is_compare_chain} ? $r0->{right}->{right} : $r0->{right}),
+                    operator        => $r1,
+                    right           => $r2,
+                    precedence      => $r3,
+                    associativity   => $r4,
+                ),
+                precedence      => 40,
+                associativity   => -1,
+                is_compare_chain => 1,
+            );
+        }
+        else {
+            $ctx->{last_match} = AST::CmpOp->new (
+                node_type       => 'cmp_op',
+                left            => $r0,
+                operator        => $r1,
+                right           => $r2,
+                precedence      => $r3,
+                associativity   => $r4,
+            );
+        }
+    }
+
+=head2 and_or_op
+
+This op handles the logical and/or operators.
+
+    &and_or_op () {
+        $ctx->{last_match} = AST::AndOrOp->new (
+            node_type       => 'and_or_op',
+            left            => $ctx->register (0),
+            operator        => $ctx->register (1),
+            right           => $ctx->register (2),
+            precedence      => $ctx->register (3),
+            associativity   => $ctx->register (4),
+        );
+    }
+
+=head2 assign_op
+
+This op handles the assignment operators.
+
+    &assign_op ( $$r0 $$r1 $$r2 $$r3 $$r4 ) {
+        return _fatal_error_msg (
+            $ctx, [ "left-hand side of assignment must be a value ref" ]
+        ) unless ref ($r2) && $r2->{node_type} &&
+                 $r2->{node_type} eq 'value_ref';
+        $ctx->{last_match} = AST::AssignOp->new (
+            node_type       => 'assign_op',
+            right           => $r2, # right associtivity swap
+            operator        => $r1,
+            left            => $r0,
+            precedence      => $r3,
+            associativity   => $r4,
+        );
+    }
+
+=head2 cond_op
+
+This op handles the conditional ?: expression. This is really a trinary expression
+where a hack is being used handle it. It is incomplete since an invalid expression
+will be successfully parsed. For example C<< a : b >>. A postprocessing step is
+needed to check for these cases.
+
+This hack is depending on the C<< ? >> and C<< : >> operators being the same precedenece,
+right associative and being the only operators at thier precedence level.
+
+    &cond_op ( $$r0 $$r1 $$r2 $$r3 $$r4 ) {
+        return _fatal_error_msg (
+            $ctx,
+            [
+                'expected <cond> ? <true-expr> : <false-expr>, got <expr> ? ' .
+                (ref ($r0) && $r0->{operator} ? '<expr> ' . $r0->{operator} :
+                 ref ($r0) && $r0->{node_type} ? $r0->{node_type} :
+                 ref ($r0) || "$r0")
+            ]
+        ) unless ref ($r0) && ($r0->{operator} || '') eq ':';
+        $ctx->{last_match} = AST::CondOp->new (
+            node_type       => 'cond_op',
+            cond            => $r2,
+            true            => $r0->{right},
+            false           => $r0->{left},
+            operator        => $r1,
+            precedence      => $r3,
+            associativity   => $r4,
+        );
+    }
+
+=head1 THE EXPRESSION ATOM RULE
+
+Here is an expression atom rule. This rule is handling
+special constants as unquoted values. Note the unrolling of the
+of the number matching in the key match directive. This is one
+way to speed up the expression atom rule without adding too
+much complexity.
+
+    # 1.2.3.4 must be checked before the int calue 1 or floating/fixed point value 1.2
+    # first.last@example.com must be checked for before example.com
+    expression_atom ::= $$ = ( &&key_match {
+        '-'         => signed_int_value                           |
+        '+'         => signed_int_value                           |
+        '0'         => ( ipv4_addr_port_mask | signed_int_value ) |
+        '1'         => ( ipv4_addr_port_mask | signed_int_value ) |
+        '2'         => ( ipv4_addr_port_mask | signed_int_value ) |
+        '3'         => ( ipv4_addr_port_mask | signed_int_value ) |
+        '4'         => ( ipv4_addr_port_mask | signed_int_value ) |
+        '5'         => ( ipv4_addr_port_mask | signed_int_value ) |
+        '6'         => ( ipv4_addr_port_mask | signed_int_value ) |
+        '7'         => ( ipv4_addr_port_mask | signed_int_value ) |
+        '8'         => ( ipv4_addr_port_mask | signed_int_value ) |
+        '9'         => ( ipv4_addr_port_mask | signed_int_value ) |
+        '\''        => 0x27 $$ = _string_const                    |
+        '"'         => 0x22 $$ = _interpolated_text               |
+        '$'         => '$'  $$ = _value_ref                       |
+        '['         => '['  $$ = _array_ctor                      |
+        '{'         => '{'  $$ = _hash_ctor                       |
+        '('         => '(' ws? $$r0 = expression ws?
+                        (')' | &&fatal["missing closing parend in group"]) $$ = $$r0
+        } |
+        ( email_addr_const | fqdn_const | function_call )
+        ).
+
+=head1 SEE ALSO
+
+L<WW::ParserGen::PDA::Manual::Intro>
+
+=head1 COPYRIGHT
+
+Copyright (c) 2013 by Lee Woodworth. All rights reserved.
+
+This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
+
+=cut
+
+

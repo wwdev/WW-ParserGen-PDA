@@ -1,0 +1,176 @@
+=pod
+
+=head1 NAME
+
+WW::ParserGen::PDA::Manual::Syntax - Grammar Specification Syntax
+
+=head1 DESCRIPTION
+
+This document provides an abstract version of the specification language in
+a modified EBNF notation. Optional whitespace is usually implied between match 
+specifications except between keyword literals or prefix characters and a
+following name. Comments start with the '#' character and continue to the
+end of the line.
+
+=head1 GRAMMAR SPECIFICATION
+
+
+=head2 rule_defs
+
+This is the top-level rule specifying the syntax for a specification file.
+
+   <rule_defs> ::=
+        <parser_package> <node_package_prefix>? <use_package>*
+        <imported_parse_op>* <infix_op_table>*
+        ( <rule_def> | <token_def> | <custom_parse_op> )+.
+
+=head2 parser_package / node_package_prefix / use package / infix_op_table
+
+    <parser_package>        ::= '@package' <fq_package> '.'.
+
+    <node_package_prefix>   ::= '@node_package_prefix' <fq_package> '.'.
+
+    <use_package>           ::= '@use' <fq_package> '::'? ( 'qw(' <word>* ')' )? '.'.
+
+    <imported_parse_op>     ::= '@match' <name> '.'.
+
+    <infix_op_table>        ::= '@infix_operators' <name> '{' <infix_op_info>+ '}'.
+
+    <infix_op_info>         ::=
+        <operator_string> ( 'left' | 'right' ) <precedence_int> 
+        ( '&'<constructor_op_name> )?.
+
+    <operator_string>       ::= "'" --characters with code points in the range 0x20 - 0x7E except for '-- "'".
+    <precedence_int>        ::= <digits>.
+    <constructor_op_name>   ::= <name>.
+
+=head2 rule_def / token_def / custom_parse_op
+
+    <rule_def>              ::=
+        <rule_name> ( '=>' <node_package>? <rule_vars>? )? '::=' <match> '.'.
+
+    <rule_name>             ::= <name>.
+    <node_package>          ::= <fq_package>.
+    <rule_vars>             ::= '{' ( '$'<name> )+ '}'.
+
+The actual syntax requires one of C<< <node_package> >> or C<< <rule_vars> >> after
+the C<< '=>' >> token. Having both is also allowed.
+
+    <token_def>             ::=
+        '&' <token_name> ( ':' 'case_insensitive' )? '::=' <token_match> '.'.
+
+    <token_name>            ::= <name>.
+
+    <custom_parse_op>       ::=
+        '&' <op_name> '(' 
+            ( '$$text_ref' | '$$offset' | '$$rule_vars' | '$$r'<digit> | '$'<name> )* 
+         ')' '::=' '{'
+            --perl_code_block--
+        '}'.
+
+    <op_name>               ::= <name>.
+
+The closing } for the perl code block must be at the start of a line - no leading white space.
+All other lines in the code block must have leading white space.
+
+=head2 match / token_match
+
+    <match>                 ::= <match_spec>+ ( '|' <match_spec>+ )*.
+    <match_spec>            ::=
+        <literal_match> | <regex_match> | <char_class> | <rule_match> | 
+        <rule_call> | <parse_op_call> | <trace_flags> | <debug_break> |
+        <fatal> | <expr_op> | <expr_op_right_arg> | <expr_tree> | 
+        <key_match> | <var_assign> |
+        '(' <match> ')' <std_quantifier>?.
+
+    <literal_match>         ::= ( "'" --chars-- "'" | '0x'<hex_digits> ) <ext_quantifier>?.
+    <regex_match>           ::= 'm/' --regex-text-- '/' <ext_quantifier>? |
+                                'm!' --regex-text-- '!' <ext_quantifier>?.
+    <rule_match>            ::= <rule_name> <ext_quantifier>?.
+    <rule_call>             ::= '&call[' <rule_name> ( '$$r'<digit> )* ']' <ext_quantifier>?.
+    <parse_op_call>         ::= '&'<parse_op_name> ( '[' <const_arg>* ']' )? <ext_quantifier>?.
+
+    <trace_flags>           ::= '&&trace_flags[' <digits> ']'.
+    <debug_break>           ::= '&&debug_break[' <dquote_string_const> ']'.
+    <fatal>                 ::= '&&fatal' ( '[' <const_arg>+ ']' )?.
+
+    <key_match>             ::=
+        '&&key_match' '{' ( <key> '=>' <match_spec>+ ) ( '|' <key> <match_spec>" )* '}' <std_quantifier>?.
+
+    <var_assign>            ::= 
+        <var_ref> <assign_op> ( <dquote_string_const> | '&&char[' <int_const> ']' | <match_spec> ).
+    <var_ref>               ::= '$$' | '$$r'<digit> | '$$offset' | '$'<name>.
+    <assign_op>             ::= '=' | '?=' | '+=' | '<<<' | '<<'.
+
+    <char_class>            ::= ( 'M[' | 'm[' ) ( <class_char_string> | <regex_match> | <class_char> | <char_range> )+ ']' <ext_quantifier>?.
+    <class_char_string>     ::= "'" --characters with code points in the range 0x20-0x7E except ' -- "'".
+    <class_char>            ::= --character with code point in the range 0x20 - 0x7E except ', [, ], <, >--
+    <char_range>            ::= '<' ( <range_char> '-' <range_char> ) ( '!' <range_char>+ )? '>'.
+    <range_char>            ::= <class_char> | '0x'<hex_digits>. # 2 or 4 digits
+
+    <std_quantifier>        ::= '?' | '*' | '+'.
+    <iext_quantifier>       ::= '?' | '*' | '+' | '!'.
+    <const_arg>             ::= <dquote_string_const> | '$$' | '$$r'<digit> | '$$offset' | 
+                                '$$rule_vars' | '$<name>.
+
+    <expr_op>               ::= '&&infix_operator[' <name> ']'.
+    <expr_op_right_arg>     ::= '&&infix_operator_arg'.
+    <expr_tree>             ::= '&&infix_expr_tree'.
+
+    <token_match>           ::= <token_match_atom>+ ( '|' <token_match_atom>+ )*.
+    <token_match_atom>      ::= <literal_match> | <regex_match> | <char_class> |
+                                '(' <token_match> ')' <std_quantifier>?.
+
+The C<< <literal_match> >> characters can include \\ and \' escapes. 
+See L<WW::ParserGen::PDA::Manual::InfixExpressions> for instructions on how to use
+C<< &&infix_operator >>, C<< &&expr_op_right_arg >> and C<< &&expr_tree >>to parse
+infix expressions.
+
+=head2 Terminals and Tokens
+
+    <alpha>                 ::= '_' | 'a' through - 'z' | 'A' through 'Z'.
+    <alphanumeric>          ::= '_' | 'a' through - 'z' | 'A' through 'Z' | '0' through '9'.
+
+    <name>                  ::= <alpha> <alphanumeric>*.
+    <fq_package>            ::= <name> ( '::' <name> )*.
+
+    <digit>                 ::= '0' through '9'.
+    <digits>                ::= <digit>+.
+    <hex_digits>            ::= '0' throug '0' | 'a' - 'f' | 'A' - 'F'.
+    <hex_const>             ::= '0x' <hex_digits>.
+    <int_const>             ::= <hex_const> | <digits>.
+
+    <dquote_string_const>   ::= '"' --chars in the range 0x20 - 0x7E except for " and \-- '"'.
+
+C<< <dquote_string_const> >> supports the \\ and \" escapes to include the \ and " characters.
+
+=head1 SEE ALSO
+
+=over 4
+
+=item WW/ParserGen/PDA/grammar.ebnf
+
+This is the command line tool for generating the parser PDA.
+
+=item WW::Parse::PDA::Engine, WW::Parse::PDA::ExecCtx, and WW::Parse::PDA::OpDef
+
+These classes provide more details on how the parser engine works.
+
+=item WW::ParserGen::PDA::Manual::InfixExpressions
+
+=item WW::ParserGen::PDA::Manual::CookBook
+
+These documents provide details on efficiently parsing infix expressions, and some example rules showing how to use
+some of the parser's features.    
+
+=back
+
+=head1 COPYRIGHT
+
+Copyright (c) 2013 by Lee Woodworth. All rights reserved.
+
+This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
+
+=cut
+
+

@@ -1,0 +1,592 @@
+################################################################################
+# EBNF Rules defining the rule defs used by parser-gen.pl
+################################################################################
+@package             WW::ParserGen::PDA::GrammarOps.
+@node_package_prefix WW::ParserGen::PDA::AST.
+
+@use                 WW::ParserGen::PDA::AST::.
+
+rule_defs => RuleDefs { 
+    $node_type $parser_pkg $node_pkg_prefix $pkg_use_list
+    $custom_match_list $infix_op_tables $rule_defs $token_defs 
+} ::=
+    &&trace_flags[0]
+    $node_type              = "rule_defs"           ws?
+    $parser_pkg             = parser_package        ws?
+    ($node_pkg_prefix       = node_package_prefix   ws?)?
+    ($pkg_use_list          << use_package          ws?)*
+    ($custom_match_list     << custom_match_def     ws?)*
+    ($infix_op_tables       << infix_op_table       ws?)*
+    ($rule_defs             << rule_def             ws? |
+     $token_defs            << token_def            ws?)+
+    (&at_eof | &&fatal["extra text after rule/token defs"]).
+
+parser_package ::= 
+    '@package' ws (
+        $$r0 = fq_package ws? '.' $$ = $$r0 |
+        &&fatal["expected @package <fq_package>."]
+    ).
+
+node_package_prefix ::=
+    '@node_package_prefix' ws (
+        $$r0 = fq_package ws? '.' $$ = $$r0 |
+        &&fatal["expected @node_package_prefix <fq_package>."]
+    ).
+
+use_package => UsePackage { $node_type $fq_package $use_args } ::=
+    '@use' ws (
+        $fq_package = fq_package ( $fq_package += '::' )? (
+            ws 'qw(' (
+               ( ws? $use_args << m/[^\s)]+/ )*
+                ws? ')' 
+
+                | &&fatal["expected @use " $fq_package " qw( <text>* )."]
+            )
+        )?
+        ws? '.' 
+        $node_type = "use_package"
+
+        | &&fatal["expected @use <fq_package> <qw_args>?."]
+    ).
+
+custom_match_def => CustomMatchDef { $node_type $match_name $arg_types $code } ::=
+    '@match' ws ($match_name = name ws?
+        $node_type = "custom_match_def"
+        ws? '.'
+
+        | &&fatal["expected @match <name>."]
+    ).
+
+infix_op_table => InfixOpTable { $node_type $name $operators } ::=
+    '@infix_operators' ws? $name = name ws? '{' ws? (
+        $node_type = "infix_op_table"
+        ( '}'! $operators << infix_op_info )+
+        ( '}' | &&fatal["missing closing } in infix op table " $name] )
+
+        | &&fatal["expected \"<operator>\" (left|right) <precdence-int> (&<constructor-op-name>)?"]
+    ).
+
+infix_op_info => { $operator $assoc $precedence $constructor_op } ::=
+    ( $operator             = operator_string ws?      | &&fatal["expected \"<operator>\""] )
+    ( ( 'left' $assoc = -1 | 'right' $assoc = 1 ) ws   | &&fatal["expected left | right"] )
+    ( $precedence           = m/[0-9]+/ ws?            | &&fatal["expected <precedence-int>"] )
+    ( '&' ( $constructor_op = name ws?                 | &&fatal["expected &<constructor-op-name>"] ) )?.
+
+rule_def => RuleDef { $node_type $rule_name $node_pkg $rule_vars $match } ::=
+    $rule_name              = name ws? (
+        $node_type              = "rule_def"
+        ('=>' ws? (
+            $node_pkg           = fq_package ws?
+                ($rule_vars     = rule_vars  ws?)? |
+            $rule_vars          = rule_vars  ws? |
+            &&fatal["error pkg/rule var defs for " $rule_name]
+        ) )?
+        '::=' ws? $match    = match ws? 
+        ( '.'  | &&fatal["missing terminating . in rule def for " $rule_name] )
+
+        | &&fatal["rule def error in " $rule_name]
+    ).
+
+token_def ::=
+    '&' $$r0 = name ws? 
+    (
+        '(' 
+            ws? $$r1 = _arg_defs ws? 
+        ( ')' ws? | &&fatal["missing closing ) in arg defs list for custom match " $$r0 ] )
+        $$r2 = &&call[ _custom_match_part $$r0 $$r1 ] |
+
+        $$r2 = &&call[ _token_def_part $$r0 ]
+    ) $$ = $$r2.
+
+_token_def_part => TokenDef { $node_type $token_name $is_case_insensitive $token_match } ::=
+    $node_type = "token_def"
+    $token_name = $$r0
+    ws? (':' ws? 'case_insensitive' ws? $is_case_insensitive = 1)?
+    '::=' ws? $token_match = token_match ws? '.'
+
+    | &&fatal["token def error in " $token_name].
+
+_arg_defs ::=
+    $$r0 = []
+    ( $$r0 << _arg_def ws? )*
+    $$ = $$r0.
+
+&_arg_def ::= 
+    '$' (
+        '$text_ref' | '$offset' | '$rule_vars' |
+        '$r' m[ < 0-9 > ] | '$' |
+        m[ _ <a-z> <A-Z> ] m[ _ <a-z> <A-Z> <0-9> ]*
+    ).
+
+_custom_match_part => CustomMatchDef { $node_type $match_name $arg_names $code } ::=
+    $node_type      = "custom_match_def"
+    $match_name     = $$r0
+    $arg_names      = $$r1
+    ws? '{' $code = _custom_match_code ws? 
+    ( '}' | &&fatal["missing closing } in &" $match_name " (closing } must be first char on the line)"])
+
+    | &&fatal["expected &" $match_name " (<arg-defs>*) { <mini-perl> }"].
+
+&_custom_match_code ::=
+    m[ < 0x20 - 0x7E > ]*
+    (
+        m/\n}/! 0x0D? 0x0A? m[ < 0x20 - 0x7E > ]* 
+    )*.
+
+rule_vars ::=
+    '{' ws? (
+            ( '$' $$r0 << name ws? )+
+        ( '}'  | &&fatal["missing closing } rule vars list"] )
+        $$ = $$r0
+
+        | &&fatal["expected { $<name>+ }"]
+    ).
+
+match ::= 
+    $$r0 = sequence_match ws?
+    (
+        ( '|' ws? ($$r1 << sequence_match | &&fatal["missing <match> after |"]) ws? )+
+        $$r0 = &&call[ _make_first_match $$r0 $$r1 ]
+    )? $$ = $$r0.
+
+_make_first_match => FirstMatch { $node_type $match_list } ::=
+    $node_type      = "first_match"
+    $match_list     << $$r0
+    $match_list     <<< $$r1.
+
+sequence_match ::=
+    $$r0 = match_atom ws?
+    (
+        ( '|'! $$r1 << match_atom ws? )+
+        $$r0 = &&call[ _make_sequence_match $$r0 $$r1 ]
+    )? $$ = $$r0.
+
+_make_sequence_match => SequenceMatch { $node_type $match_list } ::=
+    $node_type      = "sequence_match"
+    $match_list     << $$r0
+    $match_list     <<< $$r1.
+
+match_atom ::= $$ = (
+    literal_match | regex_match | rule_match | 
+    '&' ( 
+        '&' (
+            rule_call | trace_flags | debug_break | fail | fatal | if_true | if_false |
+            expr_op | expr_op_right_arg | expr_tree | key_match
+        ) | 
+        custom_match 
+    ) |
+    '$' ( _var_assign | _var_set_const | _var_set_match | var_ref_error ) | 
+    match_group
+).
+
+token_match ::=
+    $$r0 = token_match_seq ws?
+    (
+        ('|' ws? ($$r1 << token_match_seq | &&fatal["missing token match after |"]) ws?)+
+        $$r2 = "token_match_or"
+        $$r0 = &&call[ make_match_list $$r0 $$r1 $$r2 ]
+    )? $$ = $$r0.
+
+token_match_seq ::=
+    $$r0 = token_match_atom (
+        ($$r1 << token_match_atom ws?)+
+        $$r2 = "token_match_seq"
+        $$r0 = &&call[ make_match_list $$r0 $$r1 $$r2 ]
+    )? $$ = $$r0.
+
+token_match_atom ::= $$ = ( literal_match | regex_match | token_match_group ).
+
+token_match_group ::=
+    '(' ws? (
+        $$r0 = token_match ws? ')' ws?
+        ( $$r1 = std_quantifier )? ws? 
+        (&make_group_match | &&fatal["multiple quantifiers on group not supported"])
+
+        | &&fatal["missing closing parend in token match list"]
+    ) $$ = $$r0.
+
+&std_quantifier ::= m[ ? * +   ].
+&ext_quantifier ::= m[ ? * + ! ].
+
+literal_match => LiteralMatch { $node_type $match_text $code_point $quantifier } ::=
+    (
+        0x27 (
+            ( 0x5C $match_text += m/./ | $match_text += M[ 0x27 0x5C 0x0D 0x0A ]+ )*
+            0x27
+
+            | &&fatal["missing closing quote (') in literal match"]
+        ) |
+        '0x' (
+            $match_text     = ""
+            $code_point     = hex_code_point
+                ( m/[a-zA-Z]/! | &&fatal["invalid chars after 0x<hex-digits>"] )?
+            | &&fatal["expected 0x<hex-digits>"]
+        )
+    )
+    $node_type   = "literal_match"
+    ($quantifier = ext_quantifier)? ws?.
+
+regex_match => RegexMatch { $node_type $regex $delimiter $quantifier } ::=
+    'm/' ( ($regex += m![^/\\]+! | $regex += m![\\].! )+ $delimiter = '/' 
+        | &&fatal["missing closing / in regex"])
+    $node_type   = "regex_match"
+    ($quantifier = ext_quantifier)? ws?.
+
+regex_match => RegexMatch { $node_type $regex $delimiter $quantifier } ::=
+    'm!' ( ($regex += m/[^!\\]+/ | $regex += m![\\].! )+ $delimiter = '!' 
+        | &&fatal["missing closing ! in regex"])
+    $node_type   = "regex_match"
+    ($quantifier = ext_quantifier)? ws?.
+
+regex_match => RegexMatch { $node_type $regex $delimiter $quantifier $class_chars $code_points $char_ranges } ::=
+    ( _not_char_class $node_type = "not_char_class" | 'm[' $node_type = "char_class" ) ws? (
+        $is_char_class = 1
+        $delimiter     = "/"
+        $regex         = ""
+        (
+            '0x' $code_points << hex_code_point          ws? |
+                 $class_chars += class_chars             ws? |
+            '\'' $class_chars += m/[^'\x0D\x0A]+/ '\''   ws? |
+                 $char_ranges << char_range              ws?
+        )+
+        ws? ']'
+        ($quantifier = ext_quantifier)? ws?
+
+        | &&fatal["expected m[ ( <char> | <code-point> | <char-range> | <string> )+ ]<quantifier>?"]
+    ).
+
+&_not_char_class ::= 'M[' | '!m['.
+
+char_range => { $start $end $except } ::=
+    '<' ( ws? ( '0x' $start = hex_code_point | $start = range_char ) ws? '-' ws?
+              ( '0x' $end   = hex_code_point | $end   = range_char ) ws?
+        ('!' (
+            ws? ( ( '0x' $except << hex_code_point | $except << range_char ) ws? )+ 
+            | &&fatal["expected ! ( 0x<hex_digits> | <range-char> )+"])
+        )?
+    '>'
+    | &&fatal["expected < ( 0x<hex-digits> | <char> ) - ( 0x<hex-digits> | <char> ) ( ! <exclusion-list> )? >"]).
+
+&hex_code_point ::= m[ < 0-9 > < a-f > < A-F > ]
+                    m[ < 0-9 > < a-f > < A-F > ]+
+                    m[ < a-z > < A-Z > ]!.
+
+&class_chars ::= m[
+    < 0x21 - 0x7E !
+        0x27        # '
+        0x3C        # <
+        0x3E        # >
+        0x5B        # [
+        0x5D        # ]
+    >
+].
+
+# exclude control chars, space, -, <, >
+&range_char ::= m[ < 0x21 - 0x7E ! 0x2D 0x3C 0x3E > ].
+
+rule_match => RuleMatch { $node_type $rule_name $quantifier } ::=
+    $rule_name   = name
+    ($quantifier = ext_quantifier)?
+    $node_type   = "rule_match".
+
+# must be preceded by a & char
+custom_match => CustomMatch { $node_type $match_name $match_args $quantifier } ::=
+    $match_name  = name
+        $node_type   = "custom_match"
+        ($match_args = const_args)?
+        ($quantifier = ext_quantifier)? ws?
+    | &&fatal["expected &<name>[ (<int const>|<string_ const>)* ]"].
+
+# must be preceded by && chars
+debug_break => DebugBreakOp { $node_type $message } ::=
+    'debug_break[' ws? (
+        $node_type      = "debug_break_op"
+        $$              = string_const 
+        $message        = &get_const_value
+    ws? ']' ws?
+
+    | &&fatal["expected &&debug_break[ <string const> ]"] ).
+
+# must be preceded by && chars
+trace_flags => TraceFlags { $node_type $trace_flags } ::=
+    'trace_flags[' ws? (
+        $trace_flags = m/\d+/ ws? ']' ws?
+        $node_type = "trace_flags"
+    | &&fatal["expected &&trace_flags[<digits>]"] ).
+
+# must be preceded by && chars
+fail => Fail { $node_type } ::= 'fail' m/[_a-zA-Z0-9]/! ws?
+    $node_type = "fail".
+
+# must be preceded by && chars
+fatal => Fatal { $node_type $msg_params } ::=
+    'fatal' ws? (
+        $node_type  = "fatal"
+        $msg_params = const_args ws?
+
+    | &&fatal["expected &&fatal[(<int_const>|<string_const>|$$r<digit>|$$|$$offset|$<name>)*"] ).
+
+# must be preceded by && chars
+rule_call => RuleCall { $node_type $rule_name $reg_numbers $quantifier } ::=
+    'call[' ws? (
+        $node_type      = "rule_call"
+        $rule_name      = name ws?
+        ( '$$r' $reg_numbers << digit_const ws? )+
+    ']'
+    ($quantifier    = std_quantifier)?
+
+    | &&fatal["expected &&call[<rule name> ( $$r<digit> )+]"] ).
+
+if_true => IfTest { $node_type $var_refs } ::=
+    'if_true[' ws? (
+        $node_type      = "if_true"
+        $var_refs       = var_refs 
+    ws? ']'
+
+    | &&fatal["expected &&if_true[ <var_ref>+ ]"]).
+
+if_false => IfTest { $node_type $var_refs } ::=
+    'if_false[' ws? (
+        $node_type      = "if_false"
+        $var_refs       = var_refs 
+    ws? ']'
+
+    | &&fatal["expected &&if_false[ <var_ref>+ ]"]).
+
+expr_op => ExprOp { $node_type $op_table_name } ::=
+    'infix_operator[' ws? (
+        $node_type      = "expr_op"
+        $op_table_name  = name
+    ws? ']'
+    | &&fatal["expected &&infix_operator[<op-table-name>]"]).
+
+expr_op_right_arg => ExprOpRightArg { $node_type } ::=
+    'infix_operator_arg' m/[_a-zA-Z0-9]/!
+    $node_type = "expr_op_right_arg".
+
+expr_tree => ExprTree { $node_type } ::=
+    'infix_expr_tree' m/[_a-zA-Z0-9]/!
+    $node_type = "expr_tree".
+
+key_match => KeyMatch { $node_type $key_match_list $quantifier } ::=
+    'key_match' ws? ( '{' ws?  $node_type = "key_match"
+    (
+        $key_match_list << ( name | _string_value ) ws?
+            '=>' ws?
+        ( $key_match_list << sequence_match ws? | &&fatal["expected => <match>"] )
+        
+        ( '|' ws? (
+            $key_match_list << ( name | _string_value ) ws?
+                '=>' ws?
+            ( $key_match_list << sequence_match ws? | &&fatal["expected => <match>"] )
+
+            | &&fatal["expected | <name>|string-const> => <match>"]
+        ) )*
+    )?
+    ( '}' | &&fatal["missing closing } in &&key_match"] )
+    ( $quantifier = std_quantifier )?
+
+    | &&fatal["expected &&key_match { <name>|<string-const> => <match> | <name>|<string-const> => <match> }<quantifier>?"]).
+
+# must be preceded by a $ char
+_var_assign => VarAssign { $node_type $dest_ref $op $src_ref } ::=
+    $dest_ref       = _var_ref ws?
+    $op             = assign_op ws?
+    ('$' $src_ref   = _var_ref)
+    $node_type      = "var_assign".
+
+_var_set_const => VarSetConst { $node_type $var_ref $op $value $quantifier } ::=
+    $var_ref        = _var_ref ws?
+    $op             = assign_op ws?
+    $value          = (
+        string_const | '0x'! int_const | array_const | hash_const | undef_const |
+        char_constant
+    ) &get_const_value
+    $node_type   = "var_set_const".
+
+_var_set_match => VarSetOp { $node_type $var_ref $op $match $quantifier } ::=
+    $var_ref        = _var_ref ws?
+    $op             = assign_op ws?
+    $match          = match_atom ws?
+    ($quantifier    = std_quantifier ws?)?
+    $node_type      = "var_set_op".
+
+char_constant => ConstValue { $node_type $value_type $value } ::=
+    '&&char[' ws? (
+        $value      = &_hex_or_int_char
+        $value_type = "Str"
+        $node_type  = "const_value"
+    ws? ']'
+
+    | &&fatal["expected &&char[ 0x<hex-digits> | <decimal-digits> ]"]).
+
+var_ref_error ::=
+    &&fatal["expected <var_ref> <op> (int_const | string_const | <match>)"].
+
+match_group ::=
+    '(' ws? $$r0 = match ws? ( ')' ws? | &&fatal["missing closing ) in match group"] )
+    ( $$r1 = std_quantifier )? ws? 
+    (&make_group_match | &&fatal["multiple quantifiers on group not supported"]).
+
+make_match_list => MatchList { $node_type $match_list } ::=
+    $node_type  = $$r2
+    $match_list << $$r0
+    $match_list <<< $$r1.
+
+#-------------------------------------------------------------------------------
+# Constants
+#-------------------------------------------------------------------------------
+undef_const => ConstValue { $node_type $value_type $value } ::=
+    '<undef>'
+    $value      = <undef>
+    $value_type = "Undef"
+    $node_type  = "const_value".
+
+digit_const => ConstValue { $node_type $value_type $value } ::=
+    $value      = m/[0-9]/
+    $value_type = "Int"
+    $node_type  = "const_value".
+
+int_const => ConstValue { $node_type $value_type $value } ::=
+    $value      = m/[-+]?\d+/
+    $value_type = "Int"
+    $node_type  = "const_value".
+
+operator_string ::=
+    '"' $$r0 = "" ( (
+        (m/[\\]/ $$r0 += m/./) |
+        $$r0 += m/[^"\\]+/
+    )+ '"' | &&fatal["missing closing quote (\") in operator string"])
+    $$ = $$r0.
+
+string_const => ConstValue { $node_type $value_type $value } ::=
+    '"' ( (
+        (m/[\\]/ $value += m/./) |
+        $value += m/[^"\\]+/
+    )* '"' | &&fatal["missing closing quote in string const"])
+    $node_type  = "const_value"
+    $value_type = "Str".
+
+array_const => ConstValue { $node_type $value_type $value } ::=
+    '[' ws? ']' 
+    $value      = []
+    $value_type = "Array"
+    $node_type  = "const_value".
+    
+
+hash_const => ConstValue { $node_type $value_type $value } ::=
+    '{' ws? '}'
+    $value      = {}
+    $value_type = "Hash"
+    $node_type  = "const_value".
+
+#-------------------------------------------------------------------------------
+# Tokens/Terminals
+#-------------------------------------------------------------------------------
+
+&at_eof ( $$text_ref ) {
+    $ctx->{match_status} = pos ($$text_ref) >= length ($$text_ref);
+}
+
+&ws ::=
+    (
+        m[ 0x20 0x09 0x0D 0x0A ]+ |
+        '#' M[ 0x0A ]* 0x0A?
+    )*.
+
+&name ::= m[ _ <a-z> <A-Z> ] m[_ <a-z> <A-Z> <0-9> ]*.
+
+&fq_package ::=
+    m[ _ <a-z> <A-Z> ] m[ _ <a-z> <A-Z> <0-9> ]*
+    ( '::' m[ _ <a-z> <A-Z> ] m[ _ <a-z> <A-Z> <0-9> ]* )*.
+
+const_args ::=
+    '[' ws? (
+            ( $$r0 << (string_const | int_const | literal_var_ref) ws? )*
+        ']' ws? $$ = $$r0 
+
+        | &&fatal["expected [(<string const>|<int const>|<var ref>)*]"]
+    ).
+
+var_refs ::= ( '$' $$r0 << _var_ref ws? )+ $$ = $$r0.
+
+# must be preceded by a $ char
+_var_ref ::= 
+    '$rule_vars'    $$ = "*rule_vars*"                                                  |
+    '$r'            $$r0 = "*" ($$r0 += m/\d/ $$ = $$r0 | &&fatal["expected $$r<0-9>"]) |
+    '$offset'       $$ = "*offset*"                                                     |
+    '$'             $$ = "*match_value*"                                                 |
+    $$ = m/[_a-zA-Z][_a-zA-Z0-9]*/                                                      |
+    &&fatal["expected $$r<0-9> or $$offset or $$ or $<name>"].
+
+literal_var_ref ::= $$r0 = '$' (
+    $$r0 += '$rule_vars'                                        |
+    $$r0 += '$r' ($$r0 += m/\d/ | &&fatal["expected $$r<0-9>"]) |
+    $$r0 += '$offset'                                           |
+    $$r0 += '$'                                                 |
+    $$r0 += m/[_a-zA-Z][_a-zA-Z0-9]*/                           |
+    &&fatal["expected $$r<0-9> or $$offset or $$ or $<name>"]
+) $$ = $$r0.
+
+&assign_op ::= '=' | '+=' | '?=' | m/<<<?/.
+
+&_hex_or_int_char ($$text_ref) {
+    if ($$text_ref =~ m/\G(0x([0-9a-fA-F]+)|([0-9]+))/gc) {
+        $ctx->{match_status} = 1;
+        $ctx->{match_value} = chr (
+            defined ($2) && length ($2) ? hex ($2) : int ($3)
+        );
+    }
+    else {
+        $ctx->{match_status} = undef;
+    }
+}
+
+_string_value ::=
+    0x27 # '
+    $$r0 = "" (
+        $$r0 += M[ 0x27 0x0D 0x10 \ ]+ |
+        '\\' $$r0 += M[ 0x0D 0x10 ]
+    )*
+    ( 0x27 | &&fatal["missing closing quote (') in string constant"] )
+    $$ = $$r0.
+
+#-------------------------------------------------------------------------------
+# Utility Ops
+#-------------------------------------------------------------------------------
+
+## custom match op version of ws
+#&ws ($$text_ref) {
+#    my ($status, $f1, $f2);
+#    while (1) {
+#        $f1 = $$text_ref =~ m/\G\s+/gc;
+#        $f2 = $$text_ref =~ m/\G[#][^\x0A]*[\x0A]?/gc;
+#        $status ||= $f1 || $f2;
+#        last unless $f1 || $f2;
+#    }
+#    $ctx->{match_status} = $status;
+#}
+
+&make_group_match () {
+    my $m = $ctx->register (0);
+    my $q = $ctx->register (1);
+    if ($q && $m->quantifier) {
+        $ctx->{match_status} = undef;
+    }
+    else {
+        $m->set_quantifier ($q) if $q;
+        $ctx->{match_value} = $m;
+        $ctx->{match_status} = 1;
+    } 
+}
+
+&get_const_value () {
+    if (my $const_value = $ctx->{match_value}) {
+        $ctx->{match_status} = 1;
+        $ctx->{match_value} = $const_value->value;
+    }
+    else {
+        $ctx->{match_status} = undef;
+    }
+}
+

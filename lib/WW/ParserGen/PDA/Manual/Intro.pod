@@ -1,0 +1,690 @@
+=pod
+
+=head1 NAME
+
+WW::ParserGen::PDA::Manual::Intro - Introduction
+
+=head1 SYNOPSIS
+
+The file a-grammar.ebnf contains a grammar specification:
+
+    @package    SExpr::ParseOps.
+
+    sexpr ::= $$ = ( add_expr | mul_expr | expr_atom ).
+
+    add_expr => { $left $operator $right } ::=
+        $left       = ( mul_expr | expr_atom )            ws?
+        $operator   = ( '+' | '-')                        ws?
+        $right      = ( add_expr | mul_expr | expr_atom ) ws?.
+
+    mul_expr => { $left $operator $right } ::=
+        $left       = expr_atom                ws?
+        $operator   = ('*' | '/')              ws?
+        $right      = ( mul_expr | expr_atom ) ws?.
+
+    expr_atom ::=
+        (
+            $$r0  = m/[-+]?[0-9]+/ |
+            '(' ws?  $$r0 = sexpr ws? ')'
+        ) $$ = $$r0.
+
+    &ws ::= (
+        m/\s+/ |
+        '#' M[ '#' 0x0A ]+ 0x0D? 0x0A?
+    )+.
+
+The command to create the parser ops package for L<WW::Parse::PDA::Engine>:
+
+    parser-gen-pda.pl --verbose --generate-op-pkg a-grammar.ebnf > SExpr/ParseOps.pm
+
+The parser package SExpr::Parser:
+
+    package SExpr::Parser;
+    use strict;
+    use Moose;
+    extends 'WW::Parse::PDA::ParserBase';
+
+    sub _parse_ops_pkg { 'SExpr::ParseOps' }
+
+    sub parse_sexpr {
+        my ($self, $ident, $text, $trace_flags) = @_;
+        return $self->_parse_text ($ident, 'sexpr', \$text, $trace_flags);
+    }
+
+Using the parser:
+
+    use SExpr::Parser;
+    my ($expr_ast, $error_message) = SExpr::Parser->new->parse_sexpr (
+        'Expr1', '1 + 3 * ( 9 - 6 )'
+    );
+
+Variable C<< $expr_ast >> will then be:
+
+    {
+        left     => 1,
+        operator => '+',
+        right    => {
+            left     => 3,
+            operator => '*',
+            right    => {
+                left     => 9,
+                operator => '-',
+                right    => 6,
+            },
+        },
+    }
+
+The parser is 'self-hosting': it uses a parser generated using these tools to
+parse grammar specifications. See L<WWE<sol>ParserGenE<sol>PDAE<sol>grammar.ebnf> for the
+full range of synatx that is supported. A simplified version in EBNF format is
+at L<WW::ParserGen::PDA::Manual::Syntax>.
+
+=head1 DESCRIPTION
+
+This package builds perl parsers from ebnf-like specification files.
+The parsers constructed:
+
+=over 12
+
+=item Are intended for building abstract syntax trees (ASTs)
+
+=item Use recursive-descent from a starting rule
+
+=item Can use Perl code to perform input matching or other actions
+
+=item Provide an easy way to efficiently handle infix expressions
+
+=item Easily construct syntax trees using hash refs or objects
+
+=item Do not require a separate lexical analyzer to match tokens
+
+=item Can handle non-context free grammars
+
+=back
+
+The example given in the synopsis defines an inefficient parser for infix expressions
+using integers. The parse result is tree of hash refs. See L<WW::ParserGen::PDA::Manual::InfixExpressions>
+for a simpler and more efficient way to match infix expressions.
+
+The grammar specification uses an extended EBNF-like synatx. The basic elements
+of a grammar are rules and tokens. A rule specifies what patterns to match and how to
+construct the match value. A token specifies what patterns to match but always uses 
+the matched text as the match value. It does not allow calling other rules or returning
+a Perl reference as the match value.
+
+All identifiers and names allowed in the grammar are alphanumeric (including the underscore character (_))
+except that they do not start with a digit.
+
+=head2 Simple Rule Syntax
+
+The simplest form of a rule is:
+
+    <rule-name> '::=' <match-spec>+ '.'
+
+Where <match-spec> may be a literal match, regex match, character class match, another
+rule name, an alternation, a parenthesized match group, an assignment, or a directive.
+These will be described later. The rule matches if all of its match specs match the 
+input text. The specs are processed in left-to-right order. In this kind of rule 
+definition, the rule's match value is only set if one of the match specs explicitly
+assigns a match value.
+
+From the synopsis:
+
+    expr_atom ::=
+        (
+            $$r0  = m/[-+]?[0-9]+/ |
+            '(' ws?  $$r0 = sexpr ws? ')'
+        ) $$ = $$r0.
+
+This rule definition starts with an alternation (think of or-clauses in english),
+and ends with a match value assignment. The parse engine defines a match-value
+global-variable and per-rule call registers. The match-value variable is named C<< $$ >>.
+The 10 registers are named C<< $$r0 >> through C<< $$r9 >>.
+
+In the previous example:
+
+    $$r0 = m/[-+]?[0-9]+/
+
+specifies that register 0 should receive the match value from the regex match. The
+second alternative that is tried on failure to match the regex:
+
+   '(' ws?  $$r0 = sexpr ws? ')'
+
+specifies that a literal left-parend must be matched, then the rule C<< ws >> which
+is allowed to fail, then register 0 is assigned the match value for the rule
+C<< sexpr >>, the C<< ws >> rule is called again, and then a literal right parend
+is matched. This is only keeping the match value from the C<< sexpr >> rule. The 
+final match assignment is:
+
+    $$ = $$r0
+
+Which specifies that the match value for the C<< expr_atom >> rule is set from register 0.
+The last assignment is necessary since the match variable variable may be modified after
+every match spec. The match result of C<< sexpr >> would be overwritten by the matches
+for C<< ws >> and the literal right-parend.
+
+=head2 Rules that Return Objects or Hashes
+
+A shorthand way to define a rule that returns an object instance or a hash ref
+for its match value is:
+
+    <rule-name> '=>' <package-name>? '{' '$'<value1_name> '$'<value2_name> ...'}' '::='
+        <match-specs>* '.'
+
+The <package-name> is optional. A simple hash ref will be returned when it is not
+given. The value names defined can also be assigned to like the registers. The rule:
+
+    mul_expr => { $left $operator $right } ::=
+        $left       = expr_atom                ws?
+        $operator   = ('*' | '/')              ws?
+        $right      = ( mul_expr | expr_atom ) ws?.
+
+is assigning to the values left, operator and right. The result hash uses the value names
+for the names of the hash's keys. When a package name is given, the object is constructed like this:
+
+    $package->new (value1_name => $value1, value2_name => $value2, ...)
+
+=head2 Defining a Token
+
+The form of a token definition is:
+
+    '&'<token-name> (':' 'case_insensitive')? '::=' ( <literal-match> | <regex-match> | <char-class-match> |
+                        <token-match-alternation> | <token-match-group> )+ '.'
+
+A token differs from a rule in that it may not call any other rules or tokens, may not do
+any variable assignments or use directives and it's match value is always a string constisting
+of the matched text from start to finish. The whitespace matching token, C<< ws >> from the synopsis:
+
+    &ws ::= (
+        m/\s+/ |
+        '#' M[ '#' 0x0A ]+ 0x0D? 0x0A?
+    )+.
+
+This token skips over what the Perl regex engine considers whitespace, and also over Perl-style
+comment lines. Note that the conditional match of a line-feed at the end of a comment line. This
+is requried to match a comment line at the end of the input text.
+
+A token is called from a rule by using its name, just like calling another rule. The examples
+in the synopsis call the C<< ws >> token with a quantifier (which are described later). When 
+the C<< :case_insensitive >> flag is given, the token matches without case (dependent on how
+the Perl regex engine handles case).
+
+=head2 Namespaces
+
+Rules, tokens, and custom parse ops (described later) all share the same namespace. This disallows
+diffrent definitions from having the same name even if they are different types of things.
+
+=head2 Whitespace Handling
+
+Note that there is no automatic whitespace skipping. This allows for reliably matching
+contiguous text using multiple matches. As in the synopsis, define a token for matching
+whitespace and use it as an optional match after a literal, regex or character class 
+match. For example:
+
+    'open_' ( 'file' | 'dir' ) ws?  # will not match 'open_ file'
+
+=head2 Match Specs
+
+The basic parsing patterns one can use are:
+
+=over 4
+
+=item  B<< 'literal text' >>
+
+A literal text match matches with case. The parser engine only handles matching 
+unicode code points, not composed characters or character sequences. The literal
+text can include the escapes \n, \t, \\, \' to specify a newline character (code point 0x0A),
+a tab (0x09), a backslash (0x5C), and a single quote (0x27).
+
+=item  B<< 0xnn or 0xnnnn >>
+
+A hex code point matches exactly one code point from the input text. As with the literal
+match, character equivalences are not handled. Note that matching 0x0A matches only
+the new-line character, not a CR-LF combination. To do that use 0x0D? 0x0A.
+
+=item  B<< m/regex subset/ or m!regex subset! >>
+
+A regex match can use most of Perl's regex features except for specifying control
+flags after the regex (e.g. m/xxx/sx is not supported). The regex can span multiple
+lines, but the ignore-white-space flag will have to specified inline. The parser 
+engine uses regexes in /gc mode, so the given regex pattern will be embedded in a 
+C<< m/\G(....)/gc >> construct. Use \/ in m// and \! in m!! to inlclude the regex
+delimiter character. Any other uses of \ are just passed through to the regex
+expression.
+
+=item B<< m[ <class-spec>+ ] or M[ <class-spec>+ ] >>
+
+A character class match matches a single code point in the set of characters defined by the
+class. Use the C<< + >> or C<< * >> quantifiers to match multiple characters. The
+match value for a quantified class match is all of the characters matched. The
+C<< M[ ] >> class match negates the membership test, it matches characters not in
+the set defined by the character class.
+
+C<< class-spec >> can be one of:
+
+=over 4
+
+=item B<< a character in the range 0x20 - 0x7E >>
+
+The character must not be a sinqle quote, a back slash, a left or right angle bracket, or
+a left or right square bracket. The character is added to the character class.
+
+=item B<< 0xnn or 0xnnnn >>
+
+The code point whose hex value is 0xnn or 0xnnnn is added to the character class,
+
+=item B<< '<chars>' >>
+
+The characters in within the quotes are added to the character class. No escapes
+are supported inside the quotes.
+
+=item B<< < <start-char> - <end-char> > >>
+
+The characters within the range (including the start and end) are added to the
+character class. The start/end-char items may be hex code points or a character
+that is allowed as plain character in the class.
+
+An optional exclusion spec may placed at the end of the range:
+
+    < <start> - <end> ! <exclude-char>+ >
+
+The exclude characters are removed from the character class.
+
+=back
+
+=item  B<< rule-name or token-name >>
+
+Calling a sub-rule pauses the parsing of the current rule, then starts matching
+using the match specs in the called rule. When the called rule finishes, the
+execution of the caller resumes from the new parse position. The called rule 
+will have its own set of registers, and rule value, so it cannot affect the 
+caller's registers or rule values except by having it's match value used in
+an assignment by the caller.
+
+=item B<< &<custom-parse-op-name> >>
+
+Custom Perl code can called from within a rule. See L</Custom Match Ops (Injecting Perl into the Parse)>.
+
+=back
+
+=head2 Quantifiers
+
+As in regular expressions, quantifiers are postfix operators modifiying repetition
+or what happens on a match fail.
+
+=over 4
+
+=item B<< <match-spec>? >>
+
+The conditional match quantifier specifies that the match spec can match zero or one times.
+It is not a failure if the match spec matches no text.
+
+=item B<< <mactch-spec>* >>
+
+The zero-or-more quantifier quantifier specifies that the match spec is executed
+until it fails to match any text. The quantified match spec always succeeds. The
+match values from the repetitions are not automatically collected in a list.
+Use an array append assignment to do that (see L</Value Assignment>).
+
+=item B<< <match-spec>+ >>
+
+The one-or-more quantifier specifies that the match spec is executed until it
+fails to match any text. Unless there was at least one successful match of the
+spec, the quantified match spec will be treated as having failed.
+
+=item B<< <match-spec>! >>
+
+The negative-look ahead quantifier only applies to literal, regex, code point,
+and character class matches. This quantifier causes the match spec to be
+executed but the parse position is reset to the orginal position even if it
+succeeds. The success/fail status for the quantified match spec is inverted.
+If the spec succeeds, the quantified match is treated as having failed. This
+quantifier is useful for testing whether a match is not follwed by some pattern.
+
+=back
+
+=head2 Groups and Alternations
+
+To group a sequence of match specs, enclose them parends:
+
+    '(' <match-spec>+ ')' <quantifier>?
+
+The only quantifiers allowed on groups are C<< ? >>, C<< * >>, C<< + >>. It
+is an error to quantify a group with a single match spec that has a quantifier:
+
+    ( a+ )+  # invalid syntax
+
+Matching one of several alternatives is specified as:
+
+    <match-specs>+ ( '|' <match-specs>+ )+
+
+The alterantives are tried in definition order. Note that register and rule value 
+assignments performed in a failed alternative are not undone when an alternative
+fails. To save the match value of the successful alternative use:
+
+    $$ = ( 'abc' | m/[0-9]/ | a_rule )
+    $$r5 = ( rule1 | rule2 )
+
+or
+    ( '<' $$r0 = 'a' '>' | $$r0 = 'a' ) $$ = $$r0
+
+When matching a long list of alternatives, the key match form improves parsing performance. This 
+form does a fixed-length look ahead and then executes only the alternative whose key matches
+the look ahead. This results in an O(num-key-lengths) time to select the alternative to match
+instead of O(number-of-alternatives).
+
+    '&&key_match' '{'
+        ( <single-quoted-string> | <name> ) '=>' <match-specs>+ 
+        ( '|' ( <single-quoted-string> | <name> ) '=>' <match-specs>+ )*
+    '}'
+
+All of the C<< <name> >> or C<< <single-quoted-string> >> values must be unique, but not necessarily the same length.
+The look ahead matches the keys in groups of the same key length, starting with the longest key length. If no
+key matches, no alternatives are tried and the match fails. If a key matches, the alternative's match specs
+are executed. If the alternative fails, the key match fails. The match value for the key match is the match
+value from the successful alternative. Note that the key look ahead does not consume text, the alternatives
+will have be able to match their full key.
+
+An example:
+
+    &&key_match {
+        'ope'   => file_open_cmd |
+        'clo'   => close_cmd |
+        c       => continue_cmd
+    }
+
+    file_open_cmd := 'open' m/\w/! open_args.
+
+This will do two key lookups using look ahead keys of length 3 and then 1.
+
+=head2 Value Assignment
+
+As described previously, the match value, registers and rule values can be assigned the
+match value of a match spec. One can also assign a double-quoted string constant value
+or a ref to new empty array:
+
+    <value-ref> = "<chars>" or <value-ref> = []
+
+A new array is is always created for the array assignment.
+
+Additionally, more than simple assignment can be done, the assignment operators are:
+
+=over 4
+
+=item B<=>
+
+This is the simple assignment. The value is copied over the destination.
+
+=item B<+=>
+
+This is string concatentation. If the destination is empty or undefined, then
+the value is just assgined.
+
+=item B<?=>
+
+This is conditional assignment. If the desitination value is empty or undefined,
+then the value is assigned. If the destination and the value are both hash refs,
+then a merge is done. Keys in the destination are assigned values from the
+corresponding key in the value unless the destination key has a defined value.
+
+=item B<< << >>
+
+This is the array append operation. If the destination value is empty or undefined,
+a newly-created one-element array containing the value will be assigned. Otherwise,
+the destination must be an array ref and the value will be appended to the
+destination (i.e. pushed).
+
+=item B<< <<< >>
+
+This is the array flattening append. If the value is an array ref, then
+the list of elements from the value is appended instead of the value itself:
+
+    $$r1 << ('a' | 'b')+
+    $$r0 << "q"
+    $$r0 <<< $r1
+
+When matched against the text C<< 'abab' >>, register one would have the array ref
+C<< [ 'a', 'b', 'a', 'b' ] >>. Register one would then have C<< [ 'q', 'a', 'b', 'a', 'b' ] >>.
+
+=back
+
+=head2 Special PDA Directives
+
+There are predefined parsing directives that affect the parser's execution.
+
+=over 4
+
+=item B<< '&&fatal[' ( <string-consts> | <value-ref> )* ']' >>
+
+This directive generates an error message and immediately stops the parse. The
+error message will have the line number and character offset in the line appended
+to it. The arguments in the brackets will be concatenated together to form the
+error message. A value ref is one of:
+
+    $$, $$r<n>, $$offset, $<name>
+
+Value refs are looked up and the value used while constructing the error message.
+
+An example:
+
+    a_keyword_ block => { $keyword $list } ::= 
+        $keyword = keyword ws? '{' (
+            ( $list << block_element ws? )*
+        '}'
+
+        | &&fatal[ "missing closing } in " $keyword ]).
+
+This example's error message report the position of the opening {. An alternative's
+text position is reset if when it's precedessor fails. So the C<< &&fatal >>
+directive is executed with the original text position.
+
+=item B<< '&&trace_flags[' <digits> ']' >>
+
+This directive sets the trace flags for the execution of the current rule and
+all rules that it calls. The trace flags are restored to their previous value
+when the rule exits. This directive always succeeds.
+
+An example:
+
+    top_rule ::= &&trace_flags[0] # no tracing in general
+                rule_1 rule_2.
+
+    rule_1 ::= 'a' rule_3.
+
+    rule_3 ::= &&trace_flags[1] # see why parse fails here
+               m/[0-9]/+ rule_4.
+
+    ....
+
+=item B<< '&&call[' <rule-name> ('$$r'<n> )+ ']' >>
+
+This directive calls a rule as usual but prepopulates the called rule's registers
+with values from the caller's registers. The match status and match value are the
+called rules values.
+
+Given these rules:
+
+    caller ::= $$r0 = "A" $$r4 = "B"
+        &&call[ callee $$r4 $$r0 ].
+
+    callee ::= 'x'.
+
+When C<< caller >> is executed, C<< callee's >> registers will have:
+
+    $$r0 = "B", $$r1 = "A"
+
+=back
+
+=head2 Custom Match Ops (Injecting Perl into the Parse)
+
+The parse engine uses a push down automaton (PDA) for parsing. The grammar
+sepcification is converted into parsing ops used by the PDA. Parsing ops
+are just Perl subroutines with a specified call signature (see L<WW::Parse::PDA::OpDef>). 
+The parse engine passes each op a parsing context that has the state of 
+the parse. See L<WW::Parse::PDA::ExecCtx> for details.
+
+A custom match specification in the grammar defines a new subroutine
+that can be called from match rules. The Perl code can return a success or
+fail status and can consume input text by advancing the parse position.
+
+A custom match is called from a rule as follows:
+
+    '&'<op-name>
+    '&'<op-name>'[' "text1" "text2" ... ']'
+
+The second form passes string values to the match op as arguments.
+
+The form of a custom match op definition is:
+
+    '&'<op-name> '(' ( '$$' | '$$r'<n> | '$$offset' | '$$text_ref' | '$'<name> )* ')' '{'
+        <perl code - unquoted>
+    '}'
+
+The perl code is not parsed. The code block ends at the first right curly-brace
+right at the start of a line (no leading whitespace). The value specs in the 
+parends specify some prepoulated variables in the generated parse op:
+
+=over 4
+
+=item B<< $$ >>
+
+This spec will initialize a variable named C<< $match_value >> with the
+parse context's match_value attribute.
+
+=item B<< $$r<n> >>
+
+This spec initializes a variable named C<< $rn >> with the value of
+register C<< n >> from the context.
+
+=item B<< $$rule_vars >>
+
+This spec initializes a variable name C<< $rule_vars >> with the hash
+ref containing the current rule call's variables hash. This will be undef
+if the rule doesn't have any rule values.
+
+=item B<< $$offset >>
+
+This spec defines a variable named C<< $offset >> that has the
+current parse position in the input string (0-based):
+
+    my $offset = pos (${ $ctx->text_ref });
+
+=item B<< $$text_ref >>
+
+This spec defines a variable named C<< $text_ref >> that has a
+reference to the input string, access the string value via C<< $$text_ref >>.
+Modifying the string will break the parser, so don't do that.
+
+=item B<< $<name> >>
+
+This spec initializes a variable named C<< $<name> >> with the next
+available argument from the call to the match op.
+
+If an op was defined as:
+
+    &test ( $$ $$r0 $a $$text_ref $b $$offset ) { ... }
+
+The op's code would have these variables defined:
+
+    my ($match_value, $r0, $text_ref, $offset, $a, $b);
+
+If it was then called as:
+
+    &test[ "XX" "YYY" ]
+
+the C<< $a >> variable would have the value C<< 'XX' >>, and the C<< $b >>
+variable would have the value C<< 'YYY' >>. The C<< $r0 >> variable would have the
+context's register 0 value.
+
+If the op's code does not contain the text 'match_status', the code
+generated for the op will set the match status to 1 indicating success.
+If a match op signals failure, it must reset the parse position to
+where it was when the op was called:
+
+    my $start_pos = pos ($$text_ref);
+    if ($$text_ref =~ m/\G\w/gc) {
+        # fail - followed by a word char
+        pos ($$text_ref) = $start_pos;
+        $ctx->{match_status} = undef;
+        return $op_index + 2;
+    }
+
+    ... more checks/matches ...
+    $ctx->{match_status} = 1;
+    return $op_index + 2;
+
+An op can explicitly set the match status:
+
+    $ctx->{match_status} = 1;     # success
+    $ctx->{match_status} = undef; # fail
+
+To set the op's match value:
+
+    $ctx->{match_value} = $match_value;
+
+If an op does an explicit return it must return one of these ways:
+
+    return $op_index + 2;
+
+    return _fatal_error_msg ($ctx, [ 'message part', 'message part', ... ]);
+
+Returning via C<< _fatal_error_msg >> causes the parse to immediately halt.
+See L<WW::Parse::PDA::OpDefs> for details on _fatal_error_msg.
+
+=back
+
+=head1 PERFORMANCE
+
+The generated parsers are medium perfomance. The wall-clock time to load the
+parser specifcation parser and parse its specification takes about 0.5s on
+on low-end 2.5GHz consumer desktop. The specication has about 600 lines.
+
+Profiling the parsing shows that most of the parsing ops take about the same
+amount of time. So the way to speed up parsing performance is to reduce the
+number of parsing ops executed. The key match directive and infx expression
+parsing directives can reduce the executed op count.
+
+Another useful thing to do is to use tokens. A token rule is converted into
+a single parsing op that uses a regex. This can combine several literal,
+regex and character class matches into one op.
+
+=head1 BUGS / KNOWN ISSUES
+
+No functional issues known at the moment.
+
+There is an inconsistency in the calling convention for a token and a custom match op
+even though definitions start similarly. It is also potentially confusing that a token
+is called as <token-name> when is definition starts with &<token-name>.
+
+=head1 SEE ALSO
+
+=over 4
+
+=item WW/ParserGen/PDA/grammar.ebnf
+
+This is the command line tool for generating the parser PDA.
+
+=item WW::Parse::PDA::Engine, WW::Parse::PDA::ExecCtx, and WW::Parse::PDA::OpDef
+
+These classes provide more details on how the parser engine works.
+
+=item WW::ParserGen::PDA::Manual::InfixExpressions
+
+=item WW::ParserGen::PDA::Manual::Syntax
+
+=item WW::ParserGen::PDA::Manual::CookBook
+
+These documents provide details on efficiently parsing infix expressions, an EBNF
+version for the specification syntax, and some example rules showing how to use
+some of the parser's features.    
+
+=back
+
+=head1 COPYRIGHT
+
+Copyright (c) 2013 by Lee Woodworth. All rights reserved.
+
+This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
+
+=cut
+

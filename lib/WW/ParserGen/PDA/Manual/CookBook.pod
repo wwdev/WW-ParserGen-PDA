@@ -1,0 +1,137 @@
+=pod
+
+=head1 NAME
+
+WW::ParserGen::PDA::Manual::CookBook - Examples
+
+=head1 DESCRIPTION
+
+This document shows some examples of parser rules to accomplish certain tasks.
+
+=head2 String constant parsing
+
+These rules parse string constants delimited by single quotes, and the consecutive single quotes.
+The one quote version does not allow new lines in the text. The triple quote version does allow
+them. Each type allows \', \\, \t, and \n escapes with the usual meaning.
+
+    string_const ::= 0x27 $$ =_string_const | 0x22 $$ = _interpolated_text &_interpolation_reduce.
+
+    # must be preceded by a ' char
+    _string_const ::=
+        $$r0 = "" (
+            0x27 0x27 ( (
+                # multiline string constant: ''' .... chars ... '''
+                $$r0 += m[ 0x09 0X0D 0x0A < 0x20-0x7E ! 0x27 0x5C > ]+ | # normal chars except ' and \
+                $$r0 += _not_3quotes                                | # allow ' or '' not followed by a '
+                0x5C ( 'n' $$r0 += &&char[0x0A] | 't' $$r0 += &&char[0x09] | $$r0 += m[ 0x27 0x5C ] )
+            )*
+            0x27 0x27 0x27
+
+            | &&fatal["missing closing quotes (''') in string constant"] )
+        |
+            ( (
+                $$r0 += m[ 0x09 < 0x20-0x7E ! 0x27 0x5C > ]+ | # normal chars except ' and \
+                0x5C ( 'n' $$r0 += &&char[0x0A] | 't' $$r0 += &&char[0x09] | $$r0 += m[ 0x27 0x5C ] )
+            )*
+            0x27
+
+            | &&fatal["missing closing quote (') in string constant"] )
+        ) $$ = $$r0.
+
+    &_not_3quotes ::= '\'' '\''? '\''!.
+
+In these rules, register 0 holds the accumulated string. It is initialized to an empty string
+in case there are no content characters. Since character escapes are being translated, the
+matching is done in a rule instead of a token.
+
+These rules use the pattern:
+
+    <start_marker> ( <contents> <end_marker> | &&fatal["missing <end_marker>"] )
+
+to report the starting position of the construct that is missing an end marker. This happens
+because each alternative starts with the same parse position. When the C<< &&fatal >>
+branch is executed, the position is just after the start marker and this is the position
+the error message includes.
+
+=head2 Interpolated text
+
+This rule parses an interpolated form of string constant. The match value is an object
+that is broken down into a list of text pieces and value references to be substituted.
+
+    # must be preceded by a " char
+    _interpolated_text => InterpolatedText { $node_type $values } ::=
+        (
+            '""' ( (
+                # multiline string constant: """ ... chars ... """
+                $values << m[ 0x09 0X0D 0x0A < 0x20-0x7E ! " \ $ > ]+ | # normal chars except ", \, and $
+                '\\' $values << m[ " \ $ . 0x5B { ]                   | # allow \. \[, and \{ escapes for terminating value refs
+                $values << _not_3dquotes                              | # allow " or "" not followed by a "
+                '$' ($values << _value_ref | &&fatal["expected <value-ref>"])
+            )*
+            '"""'
+
+            | &&fatal["missing closing quotes (\"\"\") in string constant"] )
+        |
+            ( (
+                $values << m[ 0x09 < 0x20-0x7E ! " \ $ > ]+ | # normal chars except ", \, and $
+                '\\' $values << m[ " \ $ . 0x5B { ] | # allow \. \[, and \{ escapes for terminating value refs
+                '$' ($values << _value_ref | &&fatal["expected <value-ref>"])
+            )*
+            '"'
+
+            | &&fatal["missing closing quote (\") in string constant"] )
+        )
+        $node_type  = "interpolated_text".
+
+    &_not_3dquotes ::= '"' '"'? '"'!.
+
+=head2 Custom parse op for simplifying the interpolated text
+
+This parse op converts interpolated strings without value refs into plain string constants. It
+also combines consecutive literal parts into one string. This example demonstrates using custom
+parse ops to do something besides input matching.
+
+    &_interpolation_reduce ( $$ ) {
+        my $values = $last_match->{values};
+        if (!$values || 0 == @$values) {
+            $ctx->{last_match} = ''
+        }
+        else {
+            my @collapsed = shift @$values;
+            for (@$values) {
+                if (ref $_) { push @collapsed, $_; next }
+                if (!ref ($collapsed[-1])) {
+                    $collapsed[-1] .= $_;
+                }
+                else {
+                    push @collapsed, $_;
+                }
+            }
+    
+            if (1 < @collapsed) {
+                $last_match->{values} = \@collapsed;
+            }
+            else {
+                # to make sure stringification happens at run-time, we can only
+                # pass string constants up (e.g. a single value ref must be evaluated
+                # and then stringified)
+                my $v = $collapsed[0];
+                if (ref $v) { $last_match->{values} = \@collapsed; }
+                else        { $ctx->{last_match} = "$v"; }
+            }
+        }
+    }
+
+=head1 SEE ALSO
+
+L<WW::ParserGen::PDA::Manual::Intro>
+
+=head1 COPYRIGHT
+
+Copyright (c) 2013 by Lee Woodworth. All rights reserved.
+
+This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
+
+=cut
+
+
