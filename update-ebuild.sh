@@ -1,6 +1,6 @@
 #!/bin/bash
 P="WW-ParserGen-PDA"
-V="0.12.1"
+V="0.12.2"
 PV="$P-$V"
 
 overlay_dir="/usr/local/portage/dev-perl/$P"

@@ -5,3 +5,11 @@ Revision history for WW-ParserGen-PDA
 
 2013-07-29  Added documentation, minor cleanups
 
+2013-08-13  Fix type constraint error in parser-gen-pda.pl
+            when using --generate-ast-classes
+
+            Add --lib-dir to parser-gen-pda.pl to allow adding
+            perl module directories to @INC. This is for use
+            with @use A::ModuleRoot:: which searches @INC for
+            modules.
+

@@ -6,8 +6,8 @@ use Module::Build;
 my $builder = Module::Build->new (
     dist_name           => 'WW-ParserGen-PDA',
     module_name         => 'WW::ParserGen::PDA',
-    dist_author         => q{wwdev16 <wwdev@gmail.com>},
-    dist_version        => '0.12.1',
+    dist_author         => q{Lee Woodworth <wwdev16@gmail.com>},
+    dist_version        => '0.12.2',
     dist_abstract       => 'Parser generator for WW::Parse::PDA::Engine',
     license             => 'Artistic_2_0',
     create_license      => 'Artistic_2_0',

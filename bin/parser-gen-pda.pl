@@ -24,6 +24,7 @@ my ($opts, $usage) = describe_options (
     [ 'generate-ast-classes' => 'generate classes for the node packges defined in the rule defs' ],
     [ 'dest-dir=s'          => 'output destination directory', { default => '.' } ],
     [ 'base-ast-class=s'    => 'base class to use when generating ast classes' ],
+    [ 'lib-dir|I=s@'        => 'directory to add to @INC for searching for classes' ],
     [],
     [ 'help|h'              => 'display option summary' ],
     [ 'version|V'           => 'display program version' ],
@@ -37,8 +38,17 @@ if ($opts->help) {
     exit 0;
 }
 if ($opts->version) {
-    say STDOUT 'parser-gen.pl version 0.12.1';
+    say STDOUT 'parser-gen.pl version 0.12.2';
     exit 0;
+}
+if (my $lib_dirs = $opts->lib_dir) {
+    for my $lib_dir (@$lib_dirs) {
+        unless (-d $lib_dir) {
+            say STDERR "$0: $lib_dir is not a directory";
+            exit 1;
+        }
+    }
+    unshift @INC, @$lib_dirs;
 }
 
 my $verbose     = $opts->verbose || $opts->pretend || 0;
@@ -157,6 +167,7 @@ Perl source files are never overwritten in this mode.
 	--generate-ast-classes    generate classes for the node packges defined in the rule defs
 	--dest-dir                output destination directory for ast classes
 	--base-ast-class          base class to use when generating ast classes
+    -I --lib-dir              directory to add to @INC for searching for classes
 
 	-h --help                 display option summary
 	-V --version              display program version

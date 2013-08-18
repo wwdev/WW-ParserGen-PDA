@@ -12,7 +12,7 @@ use Moose;
 
 has rule_defs_ast => (
     is          => 'ro',
-    isa         => 'WW::ParserGen::ASTBase',
+    isa         => 'WW::ParserGen::PDA::ASTBase',
     required    => 1,
 );
 
